@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const zigzag = b.dependency("zigzag", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zigzag", zigzag.module("zigzag"));
+
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");

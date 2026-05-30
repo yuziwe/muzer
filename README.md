@@ -8,6 +8,8 @@ Tired of the cumbersome experience of mainstream music players, I decided to cre
 
 - Zig >= 0.17.0
 
+- [zigzag](https://github.com/meszmate/zigzag.git) >= 0.1.2
+
 ## Build and Test
 
 ~~~bash
