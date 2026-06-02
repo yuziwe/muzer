@@ -12,14 +12,26 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // zigzag
     const zigzag = b.dependency("zigzag", .{
         .target = target,
         .optimize = optimize,
     });
     exe.root_module.addImport("zigzag", zigzag.module("zigzag"));
 
+    // libmpv
+    const mpv = b.addTranslateC(.{
+        .root_source_file = b.path("src/c_api.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    exe.root_module.addImport("mpv", mpv.createModule());
+    exe.root_module.linkSystemLibrary("mpv", .{ .needed = true });
+
     b.installArtifact(exe);
 
+    // Run
     const run_step = b.step("run", "Run the app");
 
     const run_cmd = b.addRunArtifact(exe);
