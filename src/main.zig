@@ -3,12 +3,14 @@ const zz  = @import("zigzag");
 const mpv = @import("mpv");
 
 const Model = struct {
-    idx: u32,
+    idx: i32,
     cwd: [256]u8 = undefined,
     persistent_allocator: std.mem.Allocator,
     mpv_ctx: *mpv.mpv_handle,
     play_list: zz.List(Music),
-    play_status: PlayStatus = PlayStatus.FINISHED,
+    play_item: Music,
+    play_status: PlayStatus,
+    play_progress: zz.Progress,
     owned_file_paths: std.array_list.Managed([]const u8),
     file_picker: zz.components.FilePicker,
     open_file_picker: bool,
@@ -24,21 +26,32 @@ const Model = struct {
         FINISHED,
     };
 
+    const Music = struct {
+        id: i32,
+        name: []const u8,
+        resource_path: []const u8,
+        lyric_path: ?[]const u8 = null,
+        duration: i64 = 0,
+        offset: i64 = 0,
+
+        pub fn initDefault() Music {
+            return .{ .id = -1, .name = "None", .resource_path = "" };
+        }
+    };
+
     const support_exts = std.StaticStringMap(AudioFormat).initComptime(.{
         .{ ".mp3" , AudioFormat.MP3  },
         .{ ".flac", AudioFormat.FLAC },
     });
 
-    const Music = struct {
-        id: u32,
-        resource_path: []const u8,
-        lyric_path: ?[]const u8 = null,
-        duration: u32 = 0,
-        offset: u32 = 0,
-    };
+    const left_panel_ratio: f32 = 0.3;
+
+    const right_panel_ratio: f32 = 0.7;
 
     pub const Msg = union(enum) {
         key: zz.KeyEvent,
+        tick: zz.msg.Tick,
+        window_size: zz.msg.WindowSize,
     };
 
     pub fn init(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -61,6 +74,10 @@ const Model = struct {
         self.play_list.multi_select = false;
         self.play_list.height = 20;
 
+        self.play_item = Music.initDefault();
+
+        self.play_status = PlayStatus.FINISHED;
+
         self.owned_file_paths = std.array_list.Managed([]const u8).init(ctx.persistent_allocator);
 
         self.file_picker = zz.components.FilePicker.init(ctx.persistent_allocator);
@@ -74,7 +91,13 @@ const Model = struct {
 
         self.open_file_picker = false;
 
-        return .none;
+        self.play_progress = zz.Progress.init();
+        self.play_progress.setValue(0);
+        self.play_progress.show_percent = false;
+        self.play_progress.useBlock();
+        self.updatePlayerProgressWidth(ctx);
+
+        return zz.Cmd(Msg).everyMs(100);
     }
 
     pub fn deinit(self: *Model) void {
@@ -89,6 +112,21 @@ const Model = struct {
 
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
         switch (msg) {
+            .window_size => {
+                // Update width dynamically
+                self.updatePlayerProgressWidth(ctx);
+            },
+            .tick => {
+                if (self.play_status == PlayStatus.PLAYING) {
+                    // Update duration and offset within every tick
+                    self.updatePlayItemDuration();
+                    self.updatePlayItemOffset();
+
+                    // Update progress bar
+                    self.play_progress.setTotal(@floatFromInt(self.play_item.duration));
+                    self.play_progress.setValue(@floatFromInt(self.play_item.offset));
+                }
+            },
             .key => |k| {
                 if (self.open_file_picker) {
                     _ = self.file_picker.handleKey(ctx.io, k) catch false;
@@ -100,7 +138,7 @@ const Model = struct {
                         .escape => self.open_file_picker = false,
                         .char => |c| if (c == 's') {
                             self.open_file_picker = false;
-                            return self.scan_files(ctx);
+                            return self.scanFiles(ctx);
                         },
                         else => {}
                     }
@@ -110,32 +148,17 @@ const Model = struct {
 
                 switch (k.key) {
                     .enter => {
-                        if (self.play_status == PlayStatus.PAUSED) {
-                            mpv_pause(self.mpv_ctx);
-                        }
-                        const song = if (self.play_list.selectedValue()) |v| v.resource_path else "None";
-                        mpv_play(self.mpv_ctx, song);
-                        self.play_status = PlayStatus.PLAYING;
+                        self.startPlay();
                         return .none;
                     },
                     .right => {
-                        if (self.play_status == PlayStatus.PAUSED) {
-                            mpv_pause(self.mpv_ctx);
-                        }
                         self.play_list.cursorDown();
-                        const song = if (self.play_list.selectedValue()) |v| v.resource_path else "None";
-                        mpv_play(self.mpv_ctx, song);
-                        self.play_status = PlayStatus.PLAYING;
+                        self.startPlay();
                         return .none;
                     },
                     .left => {
-                        if (self.play_status == PlayStatus.PAUSED) {
-                            mpv_pause(self.mpv_ctx);
-                        }
                         self.play_list.cursorUp();
-                        const song = if (self.play_list.selectedValue()) |v| v.resource_path else "None";
-                        mpv_play(self.mpv_ctx, song);
-                        self.play_status = PlayStatus.PLAYING;
+                        self.startPlay();
                         return .none;
                     },
                     .char => |c| switch (c) {
@@ -149,12 +172,8 @@ const Model = struct {
                             return .none;
                         },
                         ' ' => {
-                            // TODO: Space was recognized as type char.
-                            // It is need to fix upstream branch code.
-                            mpv_pause(self.mpv_ctx);
-
-                            // Cycle pause
-                            self.play_status = if (self.play_status == PlayStatus.PAUSED) PlayStatus.PLAYING else PlayStatus.PAUSED;
+                            self.stopPlay();
+                            return .none;
                         },
                         else => {},
                     },
@@ -166,7 +185,32 @@ const Model = struct {
         return .none;
     }
 
-    fn scan_files(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
+    fn startPlay(self: *Model) void {
+        if (self.play_status == PlayStatus.PAUSED) {
+            // Free the pause flag first
+            mpvPause(self.mpv_ctx);
+        }
+
+        self.play_item = if (self.play_list.selectedValue()) |v| v else Music.initDefault();
+
+        if (self.play_item.id >= 0) {
+            mpvPlay(self.mpv_ctx, self.play_item.resource_path);
+            self.play_status = PlayStatus.PLAYING;
+        }
+    }
+
+    fn stopPlay(self: *Model) void {
+        if (self.play_item.id < 0) return;
+
+        // TODO: Space was recognized as type char.
+        // It is need to fix upstream branch code.
+        mpvPause(self.mpv_ctx);
+
+        // Cycle pause
+        self.play_status = if (self.play_status == PlayStatus.PAUSED) PlayStatus.PLAYING else PlayStatus.PAUSED;
+    }
+
+    fn scanFiles(self: *Model, ctx: *zz.Context) zz.Cmd(Msg) {
         // Scan files in current path
         const scan_path = self.file_picker.current_path.items;
         var target_dir = std.Io.Dir.openDirAbsolute(ctx.io, scan_path, .{ .iterate = true }) catch {
@@ -198,7 +242,7 @@ const Model = struct {
                     return .none;
                 };
                 const file_name = std.fs.path.basename(file_path);
-                self.play_list.addItem(Item.init(.{ .id = self.idx, .resource_path = file_path }, file_name)) catch {
+                self.play_list.addItem(Item.init(.{ .id = self.idx, .name = file_name, .resource_path = file_path }, file_name)) catch {
                     ctx.log("add item error", .{});
                     ctx.persistent_allocator.free(file_path);
                     return .none;
@@ -225,22 +269,70 @@ const Model = struct {
         return false;
     }
 
-    fn mpv_play(mpv_ctx: *mpv.mpv_handle, song: []const u8) void {
+    fn mpvCommand(ctx: *mpv.mpv_handle, cmd: anytype) i32 {
+        return @as(i32, mpv.mpv_command(ctx, @constCast(&cmd)));
+    }
+
+    fn mpvPlay(ctx: *mpv.mpv_handle, song: []const u8) void {
         const args = [_:null]?[*]const u8{
             "loadfile",
             song.ptr,
         };
 
-        _ = mpv.mpv_command(mpv_ctx, @constCast(&args));
+        _ = mpvCommand(ctx, args);
     }
 
-    fn mpv_pause(mpv_ctx: *mpv.mpv_handle) void {
+    fn mpvPause(ctx: *mpv.mpv_handle) void {
         const args = [_:null]?[*]const u8{
             "cycle",
             "pause",
         };
         
-        _ = mpv.mpv_command(mpv_ctx, @constCast(&args));
+        _ = mpvCommand(ctx, args);
+    }
+
+    fn mpvGetProperty(ctx: *mpv.mpv_handle, name: []const u8, format: mpv.mpv_format, data: anytype) i32 {
+        return @as(i32, mpv.mpv_get_property(ctx, name.ptr, format, data));
+    }
+
+    fn mpvGetDuration(ctx: *mpv.mpv_handle) i64 {
+        var data: i64 = undefined;
+        _ = mpvGetProperty(ctx, "duration", mpv.MPV_FORMAT_INT64, &data);
+        return data;
+    }
+
+    fn mpvGetOffset(ctx: *mpv.mpv_handle) i64 {
+        var data: i64 = undefined;
+        _ = mpvGetProperty(ctx, "time-pos", mpv.MPV_FORMAT_INT64, &data);
+        return data;
+    }
+
+    fn updatePlayerProgressWidth(self: *Model, ctx: *const zz.Context) void {
+        self.play_progress.setWidth(ctx.width -| (getLeftPanelWidth(ctx) + 22));
+    }
+
+    fn getLeftPanelWidth(ctx: *const zz.Context) u16 {
+        return @as(u16, @intFromFloat(ctx.width * left_panel_ratio));
+    }
+
+    fn getRightPanelWidth(ctx: *const zz.Context) u16 {
+        return @as(u16, @intFromFloat(ctx.width * right_panel_ratio));
+    }
+
+    // The callers need to free the returned string
+    fn convert2TimeFormat(alloc: std.mem.Allocator, value: i64) []const u8 {
+        if (value <= 0) return "--:--";
+        const min = @divFloor(value, 60);
+        const sec = @mod(value, 60);
+        return std.fmt.allocPrint(alloc, "{d}:{d}", .{ min, sec }) catch "--:--";
+    }
+
+    fn updatePlayItemDuration(self: *Model) void {
+        self.play_item.duration = mpvGetDuration(self.mpv_ctx);
+    }
+
+    fn updatePlayItemOffset(self: *Model) void {
+        self.play_item.offset = mpvGetOffset(self.mpv_ctx);
     }
 
     pub fn view(self: *const Model, ctx: *const zz.Context) []const u8 {
@@ -278,12 +370,24 @@ const Model = struct {
             .{ .constraint = .{ .percentage = 5 } },
         }, .{ .direction = .column, }) catch return "layout error";
 
-        const music_name = if (self.play_list.selectedItem()) |v| v.title else "None";
-
-        const overview_panel = renderBox(alloc, music_name, inner_rows[0].width, inner_rows[0].height, zz.Color.red, true, .center, .middle) catch "Render error";
+        const overview_panel = renderBox(alloc, self.play_item.name, inner_rows[0].width, inner_rows[0].height, zz.Color.red, true, .center, .middle) catch "Render error";
         const lyric_panel    = renderBox(alloc, "None", inner_rows[1].width, inner_rows[1].height, zz.Color.green, true, .center, .middle) catch "Render error";
         const spectrum_panel = renderBox(alloc, "None", inner_rows[2].width, inner_rows[2].height, zz.Color.yellow, true, .center, .middle) catch "Render error";
-        const player_panel   = renderBox(alloc, "None", inner_rows[3].width, inner_rows[3].height, zz.Color.magenta, true, .center, .middle) catch "Render error";
+
+        const player_status   = if (self.play_status == PlayStatus.PLAYING and self.play_list.items.items.len > 0) "||" else "|>";
+
+        const player_offset   = convert2TimeFormat(alloc, self.play_item.offset);
+
+        const player_progress = self.play_progress.view(alloc) catch "++++++++++++++++++++++++";
+
+        const player_duration = convert2TimeFormat(alloc, self.play_item.duration);
+
+        const player_content = std.fmt.allocPrint(alloc,
+            "{s} {s} {s} {s}",
+            .{ player_status, player_offset, player_progress, player_duration }
+        ) catch "None";
+
+        const player_panel   = renderBox(alloc, player_content, inner_rows[3].width, inner_rows[3].height, zz.Color.magenta, true, .center, .middle) catch "Render error";
 
         const right_panel = zz.join.vertical(alloc, .center, &.{ overview_panel, lyric_panel, spectrum_panel, player_panel }) catch "Render error";
 
@@ -294,7 +398,7 @@ const Model = struct {
         help_style = help_style.inline_style(true);
         const help = help_style.render(
             alloc,
-            "q: Quit f: Local scan Arrow keys: Play Control",
+            "q: quit f: load ↑↓: visit ←→: switch Space: pause Enter: play +/-: volume",
         ) catch "";
 
         const help_content = zz.place.place(ctx.allocator, main_rows[1].width, main_rows[1].height, .left, .bottom, help) catch help;
