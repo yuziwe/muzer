@@ -8,15 +8,13 @@ Tired of the cumbersome experience of mainstream music players, I decided to cre
 
 - Zig >= 0.17.0
 
-- [zigzag](https://github.com/meszmate/zigzag.git) >= 0.1.2
+- zigzag >= 0.1.2
 
 ## Build and Test
 
 ~~~bash
 # build
 zig build -Doptimize=ReleaseFast
-# test
-zig build test
 # run
 zig build run
 ~~~
@@ -26,4 +24,10 @@ zig build run
 ~~~bash
 muzer
 ~~~
+
+## Thanks
+
+- [miniaudio](https://github.com/mackron/miniaudio)
+
+- [zigzag](https://github.com/meszmate/zigzag)
 
