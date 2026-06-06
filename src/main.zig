@@ -38,8 +38,8 @@ const Model = struct {
         name: []const u8,
         resource_path: []const u8,
         lyric_path: ?[]const u8 = null,
-        duration: i64 = 0,
-        offset: i64 = 0,
+        duration: usize = 0,
+        offset: usize = 0,
 
         pub fn initDefault() Music {
             return .{
@@ -334,11 +334,10 @@ const Model = struct {
     }
 
     // The callers need to free the returned string
-    fn convert2TimeFormat(alloc: std.mem.Allocator, value: i64) []const u8 {
-        if (value <= 0) return "--:--";
+    fn convert2TimeFormat(alloc: std.mem.Allocator, value: usize) []const u8 {
         const min = @divFloor(value, 60);
         const sec = @mod(value, 60);
-        return std.fmt.allocPrint(alloc, "{d}:{d}", .{ min, sec }) catch "--:--";
+        return std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}", .{ min, sec }) catch "--:--";
     }
 
     pub fn view(self: *const Model, ctx: *const zz.Context) []const u8 {

@@ -16,14 +16,14 @@ allocator: std.mem.Allocator,
 play_list: std.array_list.Managed(*MaSound),
 
 const MaSound = struct {
-    duration: i64,
+    duration: usize,
     instance: ma.ma_sound,
 
-    pub fn setDuration(self: *MaSound, duration: i64) void {
+    pub fn setDuration(self: *MaSound, duration: usize) void {
         self.duration = duration;
     }
 
-    pub fn getDuration(self: MaSound) i64 {
+    pub fn getDuration(self: MaSound) usize {
         return self.duration;
     }
 
@@ -95,11 +95,11 @@ fn getCurrentSound(self: Self) *MaSound {
     return self.play_list.items[self.cursor];
 }
 
-pub fn getDuration(self: Self) i64 {
+pub fn getDuration(self: Self) usize {
     return self.getCurrentSound().getDuration();
 }
 
-pub fn getOffset(self: Self) i64 {
+pub fn getOffset(self: Self) usize {
     var offset: f32 = undefined;
     const sound = self.getCurrentSound().getSound();
     if (ma.ma_sound_get_cursor_in_seconds(@constCast(sound), &offset) != ma.MA_SUCCESS) {
