@@ -18,16 +18,34 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zigzag", zigzag.module("zigzag"));
+    // zigzag
 
-    // libmpv
-    const mpv = b.addTranslateC(.{
-        .root_source_file = b.path("src/c_api.h"),
+
+    // ma
+    const ma = b.createModule(.{
+        .root_source_file = b.path("src/ma.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("ma", ma);
+    // ma
+
+    // miniaudio
+    const miniaudio = b.addTranslateC(.{
+        .root_source_file = b.path("src/miniaudio.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+    }).createModule();
+
+    miniaudio.addCSourceFile(.{
+        .file = b.path("src/miniaudio.c"),
+        .flags = &.{},
+        .language = .c,
     });
-    exe.root_module.addImport("mpv", mpv.createModule());
-    exe.root_module.linkSystemLibrary("mpv", .{ .needed = true });
+
+    ma.addImport("miniaudio", miniaudio);
+    // miniaudio
 
     b.installArtifact(exe);
 
