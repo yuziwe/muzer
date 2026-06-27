@@ -1,23 +1,35 @@
 const std = @import("std");
-const ma  = @import("miniaudio");
+const ma = @import("miniaudio");
+const Mq = @import("mq");
+const fft = @import("fft");
 
 const Self = @This();
 
-const MaError = error {
+const MaError = error{
     MA_UNKNOWN,
     MA_OOM,
     MA_NOTFOUND,
+    MA_NODEVICE,
+    MA_DEVINIT,
 };
 
+mq: *Mq.RingBuffer(fft.Result),
 cursor: usize,
 length: usize,
 engine: ma.ma_engine,
+device: ma.ma_device,
 allocator: std.mem.Allocator,
 play_list: std.array_list.Managed(*MaSound),
+engine_config: ma.ma_engine_config,
+device_config: ma.ma_device_config,
+engine_context: ma.ma_context,
+userdata: UserData,
 
 const MaSound = struct {
     duration: usize,
     instance: ma.ma_sound,
+
+    pub const empty: MaSound = .{ .duration = 0, .instance = undefined };
 
     pub fn setDuration(self: *MaSound, duration: usize) void {
         self.duration = duration;
@@ -32,23 +44,87 @@ const MaSound = struct {
     }
 };
 
-pub fn init(self: *Self, allocator: std.mem.Allocator) MaError!void {
+const UserData = struct {
+    allocator: std.mem.Allocator,
+    engine: *ma.ma_engine,
+    mq: *Mq.RingBuffer(fft.Result),
+
+    pub fn init(allocator: std.mem.Allocator, engine: *ma.ma_engine, mq: *Mq.RingBuffer(fft.Result)) UserData {
+        return .{
+            .allocator = allocator,
+            .engine = engine,
+            .mq = mq,
+        };
+    }
+};
+
+fn progressTrack(device: [*c]ma.ma_device, output: ?*anyopaque, _: ?*const anyopaque, frame_count: ma.ma_uint32) callconv(.c) void {
+    const userdata: *UserData = @ptrCast(@alignCast(device[0].pUserData));
+    _ = ma.ma_engine_read_pcm_frames(userdata.engine, output, frame_count, null);
+    // TODO: FFT
+    if (fft.fft(userdata.allocator, @ptrCast(@alignCast(output)), frame_count)) |res| {
+        // Push
+        userdata.mq.tryPush(res) orelse return;
+    }
+}
+
+pub fn init(
+    self: *Self,
+    allocator: std.mem.Allocator,
+    mq: *Mq.RingBuffer(fft.Result),
+) MaError!void {
+    self.mq = mq;
     self.cursor = 0;
     self.length = 0;
-    if (ma.ma_engine_init(null, &self.engine) != ma.MA_SUCCESS) {
+    if (ma.ma_context_init(null, 0, null, &self.engine_context) != ma.MA_SUCCESS) {
         return MaError.MA_UNKNOWN;
     }
+    // Get output device
+    var playback_infos: [*c]ma.ma_device_info = undefined;
+    var playback_count: ma.ma_uint32 = undefined;
+    if (ma.ma_context_get_devices(&self.engine_context, &playback_infos, &playback_count, null, null) != ma.MA_SUCCESS) {
+        return MaError.MA_NODEVICE;
+    }
+
+    if (playback_count == 0) {
+        return MaError.MA_NODEVICE;
+    }
+
+    self.userdata = UserData.init(self.allocator, &self.engine, self.mq);
+
+    self.device_config = ma.ma_device_config_init(ma.ma_device_type_playback);
+    // Use the first deivce by default
+    self.device_config.playback.pDeviceID = &playback_infos[0].id;
+    self.device_config.playback.format = ma.ma_format_unknown;
+    self.device_config.playback.channels = 0;
+    self.device_config.sampleRate = 0;
+    self.device_config.dataCallback = progressTrack;
+    self.device_config.pUserData = &self.userdata;
+
+    if (ma.ma_device_init(&self.engine_context, &self.device_config, &self.device) != ma.MA_SUCCESS) {
+        return MaError.MA_DEVINIT;
+    }
+
+    self.engine_config = ma.ma_engine_config_init();
+    //self.engine_config.dataCallback = progressTrack;
+    if (ma.ma_engine_init(&self.engine_config, &self.engine) != ma.MA_SUCCESS) {
+        return MaError.MA_UNKNOWN;
+    }
+
     self.allocator = allocator;
     self.play_list = std.array_list.Managed(*MaSound).init(allocator);
 }
 
-pub fn deinit(self: Self) void {
+pub fn deinit(self: *Self) void {
     for (self.play_list.items) |sound| {
-        ma.ma_sound_uninit(sound.getSound());
+        const dnuos = sound.getSound();
+        ma.ma_sound_uninit(@constCast(dnuos));
         self.allocator.destroy(sound);
     }
     self.play_list.deinit();
     ma.ma_engine_uninit(@constCast(&self.engine));
+    ma.ma_device_uninit(@constCast(&self.device));
+    _ = ma.ma_context_uninit(@constCast(&self.engine_context));
 }
 
 pub fn play(self: *Self, cursor: usize) MaError!void {

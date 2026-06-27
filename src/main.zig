@@ -1,11 +1,14 @@
-const std = @import("std");
-const zz  = @import("zigzag");
+const zz = @import("zigzag");
+const fft = @import("fft");
 const Ma = @import("ma");
+const Mq = @import("mq");
+const std = @import("std");
 
 const Model = struct {
     idx: usize,
     cwd: [256]u8 = undefined,
     persistent_allocator: std.mem.Allocator,
+    mq: Mq.RingBuffer(fft.Result),
     ma: Ma = undefined,
     play_list: zz.List(Music),
     play_item: Music,
@@ -51,7 +54,7 @@ const Model = struct {
     };
 
     const support_exts = std.StaticStringMap(AudioFormat).initComptime(.{
-        .{ ".mp3" , AudioFormat.MP3  },
+        .{ ".mp3", AudioFormat.MP3 },
         .{ ".flac", AudioFormat.FLAC },
     });
 
@@ -75,7 +78,18 @@ const Model = struct {
 
         self.persistent_allocator = ctx.persistent_allocator;
 
-        self.ma.init(ctx.persistent_allocator) catch {
+        self.mq = Mq.RingBuffer(fft.Result).init(
+            ctx.persistent_allocator,
+            16,
+        ) catch {
+            ctx.log("init message queue failed", .{});
+            return .quit;
+        };
+
+        self.ma.init(
+            ctx.persistent_allocator,
+            &self.mq,
+        ) catch {
             ctx.log("init miniaudio failed", .{});
             return .quit;
         };
@@ -90,6 +104,12 @@ const Model = struct {
 
         self.play_mode = PlayMode.SEQUENCE;
 
+        self.play_progress = zz.Progress.init();
+        self.play_progress.setValue(0);
+        self.play_progress.show_percent = false;
+        self.play_progress.useBlock();
+        self.updatePlayerProgressWidth(ctx);
+
         self.owned_file_paths = std.array_list.Managed([]const u8).init(ctx.persistent_allocator);
 
         self.file_picker = zz.components.FilePicker.init(ctx.persistent_allocator);
@@ -103,12 +123,6 @@ const Model = struct {
 
         self.open_file_picker = false;
 
-        self.play_progress = zz.Progress.init();
-        self.play_progress.setValue(0);
-        self.play_progress.show_percent = false;
-        self.play_progress.useBlock();
-        self.updatePlayerProgressWidth(ctx);
-
         return zz.Cmd(Msg).everyMs(10);
     }
 
@@ -120,6 +134,12 @@ const Model = struct {
         self.play_list.deinit();
         self.file_picker.deinit();
         self.ma.deinit();
+        while (!self.mq.empty()) {
+            if (self.mq.tryPop()) |node| {
+                node.deinit(self.persistent_allocator);
+            }
+        }
+        self.mq.deinit();
     }
 
     pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
@@ -132,12 +152,18 @@ const Model = struct {
                 if (self.play_status == PlayStatus.PLAYING) {
                     if (self.ma.isEnd()) {
                         switch (self.play_mode) {
-                            PlayMode.SEQUENCE => {
-                                self.nextPlay();
-                            },
+                            PlayMode.SEQUENCE => self.nextPlay(),
                             PlayMode.LOOP => self.startPlay(),
-                            PlayMode.RANDOM => {},
+                            PlayMode.RANDOM => {
+                                // TODO: Random play
+                            },
                         }
+                    }
+
+                    // Update specturm
+                    if (self.mq.tryPop()) |node| {
+                        // TODO: Update freq value
+                        node.deinit(self.persistent_allocator);
                     }
 
                     // Update offset within every tick
@@ -161,7 +187,7 @@ const Model = struct {
                             self.open_file_picker = false;
                             return self.scanFiles(ctx);
                         },
-                        else => {}
+                        else => {},
                     }
 
                     return .none;
@@ -261,7 +287,7 @@ const Model = struct {
         // Scan files in current path
         const scan_path = self.file_picker.current_path.items;
         var target_dir = std.Io.Dir.openDirAbsolute(ctx.io, scan_path, .{ .iterate = true }) catch {
-            ctx.log("open {s} directory failed", .{ scan_path });
+            ctx.log("open {s} directory failed", .{scan_path});
             return .none;
         };
         defer target_dir.close(ctx.io);
@@ -305,7 +331,7 @@ const Model = struct {
                 };
                 self.idx += 1;
             } else {
-                ctx.log("Not support yet: {s}", .{ ext_name });
+                ctx.log("Not support yet: {s}", .{ext_name});
             }
         }
 
@@ -345,8 +371,7 @@ const Model = struct {
         const w: u16 = @intCast(@min(ctx.width, std.math.maxInt(u16)));
         const h: u16 = @intCast(@min(ctx.height, std.math.maxInt(u16)));
 
-        if (self.open_file_picker)
-        {
+        if (self.open_file_picker) {
             return self.file_picker.view(alloc) catch "Error file picker";
         }
 
@@ -356,13 +381,17 @@ const Model = struct {
         const main_rows = zz.flex.layout(alloc, w, h -| safe_area, &.{
             .{ .constraint = .fill },
             .{ .constraint = .{ .fixed = 1 } },
-        }, .{ .direction = .column, }) catch return "layout error";
+        }, .{
+            .direction = .column,
+        }) catch return "layout error";
 
         // Outer horizontal layout (left: 30%, right: 70%)
         const outer_cols = zz.flex.layout(alloc, main_rows[0].width, main_rows[0].height, &.{
             .{ .constraint = .{ .percentage = 30 } },
             .{ .constraint = .fill },
-        }, .{ .direction = .row, }) catch return "layout error";
+        }, .{
+            .direction = .row,
+        }) catch return "layout error";
 
         const list_view = self.play_list.view(alloc) catch "Empty list";
         const left_panel = renderBox(alloc, list_view, outer_cols[0].width, outer_cols[0].height, zz.Color.cyan, true, .left, .top) catch "Render error";
@@ -373,26 +402,25 @@ const Model = struct {
             .{ .constraint = .fill },
             .{ .constraint = .{ .percentage = 20 } },
             .{ .constraint = .{ .percentage = 5 } },
-        }, .{ .direction = .column, }) catch return "layout error";
+        }, .{
+            .direction = .column,
+        }) catch return "layout error";
 
         const overview_panel = renderBox(alloc, self.play_item.name, inner_rows[0].width, inner_rows[0].height, zz.Color.red, true, .center, .middle) catch "Render error";
-        const lyric_panel    = renderBox(alloc, "None", inner_rows[1].width, inner_rows[1].height, zz.Color.green, true, .center, .middle) catch "Render error";
+        const lyric_panel = renderBox(alloc, "None", inner_rows[1].width, inner_rows[1].height, zz.Color.green, true, .center, .middle) catch "Render error";
         const spectrum_panel = renderBox(alloc, "None", inner_rows[2].width, inner_rows[2].height, zz.Color.yellow, true, .center, .middle) catch "Render error";
 
-        const player_status   = if (self.play_status == PlayStatus.PLAYING and !self.isEmptyPlayList()) "||" else "|>";
+        const player_status = if (self.play_status == PlayStatus.PLAYING and !self.isEmptyPlayList()) "||" else "|>";
 
-        const player_offset   = convert2TimeFormat(alloc, self.play_item.offset);
+        const player_offset = convert2TimeFormat(alloc, self.play_item.offset);
 
         const player_progress = self.play_progress.view(alloc) catch "++++++++++++++++++++++++";
 
         const player_duration = convert2TimeFormat(alloc, self.play_item.duration);
 
-        const player_content = std.fmt.allocPrint(alloc,
-            "{s} {s} {s} {s}",
-            .{ player_status, player_offset, player_progress, player_duration }
-        ) catch "None";
+        const player_content = std.fmt.allocPrint(alloc, "{s} {s} {s} {s}", .{ player_status, player_offset, player_progress, player_duration }) catch "None";
 
-        const player_panel   = renderBox(alloc, player_content, inner_rows[3].width, inner_rows[3].height, zz.Color.magenta, true, .center, .middle) catch "Render error";
+        const player_panel = renderBox(alloc, player_content, inner_rows[3].width, inner_rows[3].height, zz.Color.magenta, true, .center, .middle) catch "Render error";
 
         const right_panel = zz.join.vertical(alloc, .center, &.{ overview_panel, lyric_panel, spectrum_panel, player_panel }) catch "Render error";
 
@@ -413,15 +441,7 @@ const Model = struct {
         return zz.place.place(alloc, w, h, .center, .middle, content) catch content;
     }
 
-    fn renderBox(
-        alloc: std.mem.Allocator, 
-        content: []const u8, 
-        w: u16, 
-        h: u16, 
-        border_color: zz.Color, 
-        highlight: bool, 
-        hAlign: zz.style.Align,
-        vAlign: zz.style.VAlign) ![]const u8 {
+    fn renderBox(alloc: std.mem.Allocator, content: []const u8, w: u16, h: u16, border_color: zz.Color, highlight: bool, hAlign: zz.style.Align, vAlign: zz.style.VAlign) ![]const u8 {
         // Style first
         var s = zz.Style{};
         s = s.borderAll(zz.Border.rounded);
@@ -456,20 +476,17 @@ const Model = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var program = zz.Program(Model).initWithOptions(
-        init.gpa, init.io, init.environ_map,
-        .{
-            .fps = 60,
-            .mouse = false,
-            .cursor = false,
-            .alt_screen = true,
-            .bracketed_paste = false,
-            .title = "muzer",
-            .log_file = "debug.log",
-            .unicode_width_strategy = null,
-            .suspend_enabled = false,
-        }
-    );
+    var program = zz.Program(Model).initWithOptions(init.gpa, init.io, init.environ_map, .{
+        .fps = 60,
+        .mouse = false,
+        .cursor = false,
+        .alt_screen = true,
+        .bracketed_paste = false,
+        .title = "muzer",
+        .log_file = "debug.log",
+        .unicode_width_strategy = null,
+        .suspend_enabled = false,
+    });
     defer program.deinit();
     try program.run();
 }
