@@ -20,7 +20,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("zigzag", zigzag.module("zigzag"));
     // zigzag
 
-
     // ma
     const ma = b.createModule(.{
         .root_source_file = b.path("src/ma.zig"),
@@ -29,6 +28,24 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("ma", ma);
     // ma
+
+    // mq
+    const mq = b.createModule(.{
+        .root_source_file = b.path("src/mq.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("mq", mq);
+    // mq
+
+    // fft
+    const fft = b.createModule(.{
+        .root_source_file = b.path("src/fft.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("fft", fft);
+    // fft
 
     // miniaudio
     const miniaudio = b.addTranslateC(.{
@@ -45,6 +62,8 @@ pub fn build(b: *std.Build) void {
     });
 
     ma.addImport("miniaudio", miniaudio);
+    ma.addImport("mq", mq);
+    ma.addImport("fft", fft);
     // miniaudio
 
     b.installArtifact(exe);
