@@ -95,9 +95,12 @@ pub fn init(
     self.device_config = ma.ma_device_config_init(ma.ma_device_type_playback);
     // Use the first deivce by default
     self.device_config.playback.pDeviceID = &playback_infos[0].id;
-    self.device_config.playback.format = ma.ma_format_unknown;
+    // NOTE: This config also important
+    self.device_config.playback.format = ma.ma_format_f32;
     self.device_config.playback.channels = 0;
-    self.device_config.sampleRate = 0;
+    // NOTE: we need to set sample rate
+    // othetwise we will sound a piece of shit
+    self.device_config.sampleRate = 48000;
     self.device_config.dataCallback = progressTrack;
     self.device_config.pUserData = &self.userdata;
 
@@ -106,8 +109,17 @@ pub fn init(
     }
 
     self.engine_config = ma.ma_engine_config_init();
-    //self.engine_config.dataCallback = progressTrack;
+    // NOTE: Specify the device we wanna use,
+    // otherwise it will not trigger our data callback!
+    self.engine_config.pDevice = &self.device;
+    self.engine_config.noAutoStart = ma.MA_TRUE;
     if (ma.ma_engine_init(&self.engine_config, &self.engine) != ma.MA_SUCCESS) {
+        return MaError.MA_UNKNOWN;
+    }
+
+    // NOTE: Start engine manually,
+    // otherwise it will trigger our data callback at first and crash because SIGSEV!
+    if (ma.ma_engine_start(&self.engine) != ma.MA_SUCCESS) {
         return MaError.MA_UNKNOWN;
     }
 
