@@ -45,24 +45,24 @@ const MaSound = struct {
 };
 
 const UserData = struct {
-    allocator: std.mem.Allocator,
+    ins: *Self,
     engine: *ma.ma_engine,
     mq: *Mq.RingBuffer(fft.Result),
 
-    pub fn init(allocator: std.mem.Allocator, engine: *ma.ma_engine, mq: *Mq.RingBuffer(fft.Result)) UserData {
+    pub fn init(engine: *ma.ma_engine, mq: *Mq.RingBuffer(fft.Result), ins: *Self) UserData {
         return .{
-            .allocator = allocator,
             .engine = engine,
             .mq = mq,
+            .ins = ins,
         };
     }
 };
 
 fn progressTrack(device: [*c]ma.ma_device, output: ?*anyopaque, _: ?*const anyopaque, frame_count: ma.ma_uint32) callconv(.c) void {
     const userdata: *UserData = @ptrCast(@alignCast(device[0].pUserData));
-    _ = ma.ma_engine_read_pcm_frames(userdata.engine, output, frame_count, null);
+    if (ma.ma_engine_read_pcm_frames(userdata.engine, output, frame_count, null) != ma.MA_SUCCESS) return;
     // TODO: FFT
-    if (fft.fft(userdata.allocator, @ptrCast(@alignCast(output)), frame_count)) |res| {
+    if (fft.fft(userdata.ins.allocator, @ptrCast(@alignCast(output)), frame_count)) |res| {
         // Push
         userdata.mq.tryPush(res) orelse return;
     }
@@ -90,7 +90,7 @@ pub fn init(
         return MaError.MA_NODEVICE;
     }
 
-    self.userdata = UserData.init(self.allocator, &self.engine, self.mq);
+    self.userdata = UserData.init(&self.engine, self.mq, self);
 
     self.device_config = ma.ma_device_config_init(ma.ma_device_type_playback);
     // Use the first deivce by default
@@ -117,12 +117,6 @@ pub fn init(
         return MaError.MA_UNKNOWN;
     }
 
-    // NOTE: Start engine manually,
-    // otherwise it will trigger our data callback at first and crash because SIGSEV!
-    if (ma.ma_engine_start(&self.engine) != ma.MA_SUCCESS) {
-        return MaError.MA_UNKNOWN;
-    }
-
     self.allocator = allocator;
     self.play_list = std.array_list.Managed(*MaSound).init(allocator);
 }
@@ -144,6 +138,13 @@ pub fn play(self: *Self, cursor: usize) MaError!void {
         // Reset previous sound
         self.pause(self.cursor);
         self.reset(self.cursor);
+
+        // NOTE: Start engine manually,
+        // otherwise it will trigger our data callback at first and crash because SIGSEV!
+        if (ma.ma_engine_start(&self.engine) != ma.MA_SUCCESS) {
+            return MaError.MA_UNKNOWN;
+        }
+
         // Non-block invoke
         const sound = self.play_list.items[cursor].getSound();
         _ = ma.ma_sound_start(@constCast(sound));
@@ -161,13 +162,25 @@ pub fn reset(self: Self, cursor: usize) void {
     _ = ma.ma_sound_seek_to_pcm_frame(@constCast(sound), 0);
 }
 
-pub fn pause(self: Self, cursor: usize) void {
+pub fn pause(self: *Self, cursor: usize) void {
+    // NOTE: Start engine manually,
+    // otherwise it will trigger our data callback at first and crash because SIGSEV!
+    if (ma.ma_engine_stop(&self.engine) != ma.MA_SUCCESS) {
+        return;
+    }
+
     // Non-block invoke
     const sound = self.play_list.items[cursor].getSound();
     _ = ma.ma_sound_stop(@constCast(sound));
 }
 
-pub fn resumePlay(self: Self) void {
+pub fn resumePlay(self: *Self) void {
+    // NOTE: Start engine manually,
+    // otherwise it will trigger our data callback at first and crash because SIGSEV!
+    if (ma.ma_engine_start(&self.engine) != ma.MA_SUCCESS) {
+        return;
+    }
+
     // Non-block invoke
     const sound = self.getCurrentSound().getSound();
     _ = ma.ma_sound_start(@constCast(sound));
