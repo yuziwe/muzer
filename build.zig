@@ -78,7 +78,12 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .name = "unit tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fft.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
