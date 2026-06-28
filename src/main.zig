@@ -79,7 +79,7 @@ const Model = struct {
         self.persistent_allocator = ctx.persistent_allocator;
 
         self.mq = Mq.RingBuffer(fft.Result).init(
-            ctx.persistent_allocator,
+            self.persistent_allocator,
             16,
         ) catch {
             ctx.log("init message queue failed", .{});
@@ -87,7 +87,7 @@ const Model = struct {
         };
 
         self.ma.init(
-            ctx.persistent_allocator,
+            self.persistent_allocator,
             &self.mq,
         ) catch {
             ctx.log("init miniaudio failed", .{});
