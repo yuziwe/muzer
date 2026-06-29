@@ -6,7 +6,7 @@ const PI = std.math.pi;
 const FFTError = error{ InvalidPadding, OutOfMemory };
 
 pub const Result = struct {
-    magnitudes: ?[]f32,
+    magnitudes: ?[]f64,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         if (self.magnitudes) |magnitudes| {
@@ -31,10 +31,10 @@ fn reverseBit(x: usize, n: usize) usize {
     return r;
 }
 
-fn bitReverseCopy(allocator: std.mem.Allocator, input: []const Complex(f32)) FFTError![]Complex(f32) {
+fn bitReverseCopy(allocator: std.mem.Allocator, input: []const Complex(f64)) FFTError![]Complex(f64) {
     if (@popCount(input.len) != 1) return FFTError.InvalidPadding;
 
-    var A = try allocator.alloc(Complex(f32), input.len);
+    var A = try allocator.alloc(Complex(f64), input.len);
 
     const n = log2(input.len);
     for (0..input.len) |k| {
@@ -44,7 +44,7 @@ fn bitReverseCopy(allocator: std.mem.Allocator, input: []const Complex(f32)) FFT
     return A;
 }
 
-fn iterativeFFT(allocator: std.mem.Allocator, input: []const Complex(f32)) ![]Complex(f32) {
+fn iterativeFFT(allocator: std.mem.Allocator, input: []const Complex(f64)) ![]Complex(f64) {
     if (@popCount(input.len) != 1) return FFTError.InvalidPadding;
 
     var A = try bitReverseCopy(allocator, input);
@@ -52,12 +52,12 @@ fn iterativeFFT(allocator: std.mem.Allocator, input: []const Complex(f32)) ![]Co
     var s: usize = 1;
     while ((@as(usize, 1) << @truncate(s)) <= input.len) : (s += 1) {
         const m: usize = @as(usize, 1) << @truncate(s);
-        const im: f32 = @divTrunc(-2 * PI, @as(f32, @floatFromInt(m)));
-        const wm = EXP(Complex(f32).init(0, im));
+        const im: f64 = @divTrunc(-2 * PI, @as(f64, @floatFromInt(m)));
+        const wm = EXP(Complex(f64).init(0, im));
 
         var k: usize = 0;
         while (m * k < input.len) : (k += 1) {
-            var w = Complex(f32).init(0, 1);
+            var w = Complex(f64).init(0, 1);
 
             var j: usize = 0;
             while (2 * (j + 1) < m) : (j += 1) {
@@ -86,14 +86,14 @@ fn next_pow2(n: usize) usize {
     return x;
 }
 
-fn transfer(allocator: std.mem.Allocator, sample_points: [*]f32, count: usize) ?Result {
+fn transfer(allocator: std.mem.Allocator, sample_points: [*]f64, count: usize) ?Result {
     var padding_length: usize = count;
     if (@popCount(count) != 1) {
         // Align
         padding_length = next_pow2(count);
     }
 
-    var fin = allocator.alloc(Complex(f32), padding_length) catch return null;
+    var fin = allocator.alloc(Complex(f64), padding_length) catch return null;
     defer allocator.free(fin);
 
     for (0..count) |i| {
@@ -104,7 +104,7 @@ fn transfer(allocator: std.mem.Allocator, sample_points: [*]f32, count: usize) ?
     const res = iterativeFFT(allocator, fin[0..]) catch return null;
     defer allocator.free(res);
 
-    const fout = allocator.alloc(f32, padding_length) catch return null;
+    const fout = allocator.alloc(f64, padding_length) catch return null;
 
     for (res, fout) |cv, *v| {
         v.* = cv.squaredMagnitude();
@@ -115,7 +115,7 @@ fn transfer(allocator: std.mem.Allocator, sample_points: [*]f32, count: usize) ?
     };
 }
 
-pub fn fft(allocator: std.mem.Allocator, sample_points: ?[*]f32, count: usize) ?Result {
+pub fn fft(allocator: std.mem.Allocator, sample_points: ?[*]f64, count: usize) ?Result {
     if (count == 0) return null;
     if (sample_points) |v| {
         return transfer(allocator, v, count);
@@ -124,7 +124,7 @@ pub fn fft(allocator: std.mem.Allocator, sample_points: ?[*]f32, count: usize) ?
 }
 
 test "bitReverseCopy" {
-    const input: [4]Complex(f32) = .{
+    const input: [4]Complex(f64) = .{
         .{
             .re = 0.1234,
             .im = 0,
@@ -153,7 +153,7 @@ test "bitReverseCopy" {
 }
 
 test "bitReverseCopy-bound" {
-    const input: [3]Complex(f32) = .{
+    const input: [3]Complex(f64) = .{
         .{
             .re = 0.1234,
             .im = 0,
@@ -173,7 +173,7 @@ test "bitReverseCopy-bound" {
 }
 
 test "iterativeFFT" {
-    const input: [4]Complex(f32) = .{
+    const input: [4]Complex(f64) = .{
         .{
             .re = 0.1234,
             .im = 0,

@@ -15,6 +15,7 @@ const Model = struct {
     play_status: PlayStatus,
     play_mode: PlayMode,
     play_progress: zz.Progress,
+    play_spectrum: zz.Sparkline,
     owned_file_paths: std.array_list.Managed([]const u8),
     file_picker: zz.components.FilePicker,
     open_file_picker: bool,
@@ -110,6 +111,12 @@ const Model = struct {
         self.play_progress.useBlock();
         self.updatePlayerProgressWidth(ctx);
 
+        self.play_spectrum = zz.Sparkline.init(self.persistent_allocator);
+        self.play_spectrum.setSummary(.average);
+        self.play_spectrum.setRetentionLimit(1024);
+        self.play_spectrum.setGradient(zz.Color.hex("#F97316"), zz.Color.hex("#22C55E"));
+        self.updatePlayerspectrumWidth(ctx);
+
         self.owned_file_paths = std.array_list.Managed([]const u8).init(ctx.persistent_allocator);
 
         self.file_picker = zz.components.FilePicker.init(ctx.persistent_allocator);
@@ -132,6 +139,7 @@ const Model = struct {
         }
         self.owned_file_paths.deinit();
         self.play_list.deinit();
+        self.play_spectrum.deinit();
         self.file_picker.deinit();
         self.ma.deinit();
         while (!self.mq.empty()) {
@@ -147,6 +155,7 @@ const Model = struct {
             .window_size => {
                 // Update width dynamically
                 self.updatePlayerProgressWidth(ctx);
+                self.updatePlayerspectrumWidth(ctx);
             },
             .tick => {
                 if (self.play_status == PlayStatus.PLAYING) {
@@ -160,9 +169,16 @@ const Model = struct {
                         }
                     }
 
-                    // Update specturm
+                    // Update spectrum
                     if (self.mq.tryPop()) |node| {
-                        // TODO: Update freq value
+                        if (node.magnitudes) |magnitudes| {
+                            // Update frequency value
+                            self.play_spectrum.setData(magnitudes[0..]) catch {
+                                ctx.log("update data failed", .{});
+                                node.deinit(self.persistent_allocator);
+                                return .none;
+                            };
+                        }
                         node.deinit(self.persistent_allocator);
                     }
 
@@ -351,6 +367,10 @@ const Model = struct {
         self.play_progress.setWidth(ctx.width -| (getLeftPanelWidth(ctx) + 22));
     }
 
+    fn updatePlayerspectrumWidth(self: *Model, ctx: *const zz.Context) void {
+        self.play_spectrum.setWidth(ctx.width -| (getLeftPanelWidth(ctx) + 22));
+    }
+
     fn getLeftPanelWidth(ctx: *const zz.Context) u16 {
         return @as(u16, @intFromFloat(ctx.width * left_panel_ratio));
     }
@@ -396,11 +416,11 @@ const Model = struct {
         const list_view = self.play_list.view(alloc) catch "Empty list";
         const left_panel = renderBox(alloc, list_view, outer_cols[0].width, outer_cols[0].height, zz.Color.cyan, true, .left, .top) catch "Render error";
 
-        // Inner vertical layout of right panel (overview: 5%, lyric: 70%, spectrum: 20%, player: 5%)
+        // Inner vertical layout of right panel (overview: 5%, lyric: 80%, spectrum: 10%, player: 5%)
         const inner_rows = zz.flex.layout(alloc, outer_cols[1].width, outer_cols[1].height, &.{
             .{ .constraint = .{ .percentage = 5 } },
             .{ .constraint = .fill },
-            .{ .constraint = .{ .percentage = 20 } },
+            .{ .constraint = .{ .percentage = 10 } },
             .{ .constraint = .{ .percentage = 5 } },
         }, .{
             .direction = .column,
@@ -408,7 +428,6 @@ const Model = struct {
 
         const overview_panel = renderBox(alloc, self.play_item.name, inner_rows[0].width, inner_rows[0].height, zz.Color.red, true, .center, .middle) catch "Render error";
         const lyric_panel = renderBox(alloc, "None", inner_rows[1].width, inner_rows[1].height, zz.Color.green, true, .center, .middle) catch "Render error";
-        const spectrum_panel = renderBox(alloc, "None", inner_rows[2].width, inner_rows[2].height, zz.Color.yellow, true, .center, .middle) catch "Render error";
 
         const player_status = if (self.play_status == PlayStatus.PLAYING and !self.isEmptyPlayList()) "||" else "|>";
 
@@ -419,6 +438,10 @@ const Model = struct {
         const player_duration = convert2TimeFormat(alloc, self.play_item.duration);
 
         const player_content = std.fmt.allocPrint(alloc, "{s} {s} {s} {s}", .{ player_status, player_offset, player_progress, player_duration }) catch "None";
+
+        const player_spectrum = self.play_spectrum.view(alloc) catch "++++++++++++++++++++++++";
+
+        const spectrum_panel = renderBox(alloc, player_spectrum, inner_rows[2].width, inner_rows[2].height, zz.Color.yellow, true, .center, .middle) catch "Render error";
 
         const player_panel = renderBox(alloc, player_content, inner_rows[3].width, inner_rows[3].height, zz.Color.magenta, true, .center, .middle) catch "Render error";
 
